@@ -1,0 +1,9 @@
+{
+            "DEV": 0,
+            "DEFAULT": {
+                "1":"2",
+                "3": 4
+            },
+            "PROD-REAL": 1,
+            "PROD-TRIAL": 1
+}

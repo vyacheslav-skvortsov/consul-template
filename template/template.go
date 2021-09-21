@@ -268,6 +268,7 @@ func funcMap(i *funcMapInput) template.FuncMap {
 		"mergeMapWithOverride":  mergeMapWithOverride,
 		"in":                    in,
 		"indent":                indent,
+		"indexOrDefault":        indexOrDefault,
 		"loop":                  loop,
 		"join":                  join,
 		"trimSpace":             trimSpace,

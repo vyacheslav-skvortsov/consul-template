@@ -50,6 +50,15 @@ type CLI struct {
 	stopped bool
 }
 
+//DEBUG
+// func NewCLIDebug(err io.Writer) *CLI {
+// 	return &CLI{
+// 		errStream: err,
+// 		signalCh:  make(chan os.Signal, 1),
+// 		stopCh:    make(chan struct{}),
+// 	}
+// }
+
 // NewCLI creates a new CLI object with the given stdout and stderr streams.
 func NewCLI(out, err io.Writer) *CLI {
 	return &CLI{

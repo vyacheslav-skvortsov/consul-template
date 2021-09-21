@@ -35,6 +35,16 @@ import (
 // primarily for the tests to override times.
 var now = func() time.Time { return time.Now().UTC() }
 
+func indexOrDefault(items map[string]interface{}, index string) (interface{}, error) {
+	if v, found := items[index]; found {
+		return v, nil
+	} else if v, found := items["DEFAULT"]; found {
+		return v, nil
+	}
+
+	return "<no value>", nil
+}
+
 // datacentersFunc returns or accumulates datacenter dependencies.
 func datacentersFunc(b *Brain, used, missing *dep.Set) func(ignore ...bool) ([]string, error) {
 	return func(i ...bool) ([]string, error) {
