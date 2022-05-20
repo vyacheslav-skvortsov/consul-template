@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"reflect"
 	"strconv"
 	"sync"
 	"time"
@@ -48,10 +49,6 @@ type Runner struct {
 	// inStream is the ioReader where the runner will read information.
 	outStream, errStream io.Writer
 	inStream             io.Reader
-
-	// ctemplatesMap is a map of each template ID to the TemplateConfigs
-	// that made it.
-	ctemplatesMap map[string]config.TemplateConfigs
 
 	// templates is the list of calculated templates.
 	templates []*template.Template
@@ -168,6 +165,9 @@ type RenderEvent struct {
 	// been rendered we need to know if the event is triggered by quiesence
 	// and if we can skip evaluating it as a render event for those purposes
 	ForQuiescence bool
+
+	// Error contains the error encountered while rendering the template.
+	Error error
 }
 
 // NewRunner accepts a slice of TemplateConfigs and returns a pointer to the new
@@ -221,6 +221,26 @@ func (r *Runner) Start() {
 		r.ErrCh <- err
 		return
 	}
+	if r.config.ParseOnly {
+		log.Printf("[INFO] (runner) ParseOnly mode and all templates parsed")
+
+		if r.child != nil {
+			r.stopDedup()
+			r.stopWatcher()
+
+			log.Printf("[INFO] (runner) waiting for child process to exit")
+			select {
+			case c := <-childExitCh:
+				log.Printf("[INFO] (runner) child process died")
+				r.ErrCh <- NewErrChildDied(c)
+				return
+			case <-r.DoneCh:
+			}
+		}
+
+		r.Stop()
+		return
+	}
 
 	for {
 		// Warn the user if they are watching too many dependencies.
@@ -241,14 +261,13 @@ func (r *Runner) Start() {
 					continue NEXT_Q
 				}
 
-				for _, c := range r.templateConfigsFor(t) {
-					if *c.Wait.Enabled {
-						log.Printf("[DEBUG] (runner) enabling template-specific "+
-							"quiescence for %q", t.ID())
-						r.quiescenceMap[t.ID()] = newQuiescence(
-							r.quiescenceCh, *c.Wait.Min, *c.Wait.Max, t)
-						continue NEXT_Q
-					}
+				c := r.templateConfigFor(t)
+				if *c.Wait.Enabled {
+					log.Printf("[DEBUG] (runner) enabling template-specific "+
+						"quiescence for %q", t.ID())
+					r.quiescenceMap[t.ID()] = newQuiescence(
+						r.quiescenceCh, *c.Wait.Min, *c.Wait.Max, t)
+					continue NEXT_Q
 				}
 
 				if *r.config.Wait.Enabled {
@@ -262,7 +281,7 @@ func (r *Runner) Start() {
 
 			// If an exec command was given and a command is not currently running,
 			// spawn the child process for supervision.
-			if config.StringPresent(r.config.Exec.Command) {
+			if !r.config.Exec.Command.Empty() {
 				// Lock the child because we are about to check if it exists.
 				r.childLock.Lock()
 
@@ -275,7 +294,7 @@ func (r *Runner) Start() {
 						Stdin:        r.inStream,
 						Stdout:       r.outStream,
 						Stderr:       r.errStream,
-						Command:      config.StringVal(r.config.Exec.Command),
+						Command:      r.config.Exec.Command,
 						Env:          env.Env(),
 						ReloadSignal: config.SignalVal(r.config.Exec.ReloadSignal),
 						KillSignal:   config.SignalVal(r.config.Exec.KillSignal),
@@ -565,15 +584,15 @@ func (r *Runner) Run() error {
 	// ensures all commands execute at least once.
 	var errs []error
 	for _, t := range runCtx.commands {
-		command := config.StringVal(t.Exec.Command)
-		log.Printf("[INFO] (runner) executing command %q from %s", command, t.Display())
+		log.Printf("[INFO] (runner) executing command %q from %s",
+			fmt.Sprintf("%q", t.Exec.Command), t.Display())
 		env := t.Exec.Env.Copy()
 		env.Custom = append(r.childEnv(), env.Custom...)
 		if _, err := spawnChild(&spawnChildInput{
 			Stdin:        r.inStream,
 			Stdout:       r.outStream,
 			Stderr:       r.errStream,
-			Command:      command,
+			Command:      t.Exec.Command,
 			Env:          env.Env(),
 			Timeout:      config.TimeDurationVal(t.Exec.Timeout),
 			ReloadSignal: config.SignalVal(t.Exec.ReloadSignal),
@@ -581,7 +600,8 @@ func (r *Runner) Run() error {
 			KillTimeout:  config.TimeDurationVal(t.Exec.KillTimeout),
 			Splay:        config.TimeDurationVal(t.Exec.Splay),
 		}); err != nil {
-			s := fmt.Sprintf("failed to execute command %q from %s", command, t.Display())
+			s := fmt.Sprintf("failed to execute command %q from %s",
+				fmt.Sprintf("%q", t.Exec.Command), t.Display())
 			errs = append(errs, errors.Wrap(err, s))
 		}
 	}
@@ -640,7 +660,8 @@ type templateRunCtx struct {
 // template to run and a shared run context that allows sharing of information
 // between templates. The run returns a potentially nil render event and any
 // error that occured. The render event is nil in the case that the template has
-// been already rendered and is a once template or if there is an error.
+// been already rendered and is a once template or if there is an error and
+// fatal errors are enabled.
 func (r *Runner) runTemplate(tmpl *template.Template, runCtx *templateRunCtx) (*RenderEvent, error) {
 	log.Printf("[DEBUG] (runner) checking template %s", tmpl.ID())
 
@@ -652,7 +673,7 @@ func (r *Runner) runTemplate(tmpl *template.Template, runCtx *templateRunCtx) (*
 	// Create the event
 	event := &RenderEvent{
 		Template:        tmpl,
-		TemplateConfigs: r.templateConfigsFor(tmpl),
+		TemplateConfigs: config.TemplateConfigs{r.templateConfigFor(tmpl)},
 	}
 
 	if lastEvent != nil {
@@ -687,7 +708,23 @@ func (r *Runner) runTemplate(tmpl *template.Template, runCtx *templateRunCtx) (*
 		Env:   r.childEnv(),
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, tmpl.Source())
+		if tmpl.ErrFatal() {
+			return nil, errors.Wrap(err, tmpl.Source())
+		}
+		log.Printf("[ERR] (runner) %s: %v", tmpl.Source(), err)
+		event.Error = err
+
+		if lastEvent != nil {
+			// Keep watching our dependencies so that we retry when they update.
+			for _, d := range lastEvent.UsedDeps.List() {
+				if _, ok := runCtx.depsMap[d.String()]; !ok {
+					runCtx.depsMap[d.String()] = d
+				}
+			}
+			event.UsedDeps = lastEvent.UsedDeps
+		}
+
+		return event, nil
 	}
 
 	// Grab the list of used and missing dependencies.
@@ -768,7 +805,8 @@ func (r *Runner) runTemplate(tmpl *template.Template, runCtx *templateRunCtx) (*
 
 	// For each template configuration that is tied to this template, attempt to
 	// render it to disk and accumulate commands for later use.
-	for _, templateConfig := range r.templateConfigsFor(tmpl) {
+	templateConfig := r.templateConfigFor(tmpl)
+	if templateConfig != nil {
 		log.Printf("[DEBUG] (runner) rendering %s", templateConfig.Display())
 
 		// Render the template, taking dry mode into account
@@ -780,9 +818,16 @@ func (r *Runner) runTemplate(tmpl *template.Template, runCtx *templateRunCtx) (*
 			DryStream:      r.outStream,
 			Path:           config.StringVal(templateConfig.Destination),
 			Perms:          config.FileModeVal(templateConfig.Perms),
+			User:           config.StringVal(templateConfig.User),
+			Group:          config.StringVal(templateConfig.Group),
 		})
 		if err != nil {
-			return nil, errors.Wrap(err, "error rendering "+templateConfig.Display())
+			if tmpl.ErrFatal() {
+				return nil, errors.Wrap(err, "error rendering "+templateConfig.Display())
+			}
+			log.Printf("[ERR] (runner) error rendering: %s: %v", templateConfig.Display(), err)
+			event.Error = err
+			return event, nil
 		}
 
 		renderTime := time.Now().UTC()
@@ -820,8 +865,7 @@ func (r *Runner) runTemplate(tmpl *template.Template, runCtx *templateRunCtx) (*
 				// in the order in which they are provided in the TemplateConfig
 				// definitions. If we inserted commands into a map, we would lose that
 				// relative ordering and people would be unhappy.
-				// if config.StringPresent(ctemplate.Command)
-				if c := config.StringVal(templateConfig.Exec.Command); c != "" {
+				if c := templateConfig.Exec.Command; !c.Empty() {
 					existing := findCommand(templateConfig, runCtx.commands)
 					if existing != nil {
 						log.Printf("[DEBUG] (runner) skipping command %q from %s (already appended from %s)",
@@ -854,6 +898,7 @@ func (r *Runner) init() error {
 	log.Printf("[DEBUG] (runner) final config: %s", result)
 
 	dep.SetVaultDefaultLeaseDuration(config.TimeDurationVal(r.config.Vault.DefaultLeaseDuration))
+	dep.SetVaultLeaseRenewalThreshold(*r.config.Vault.LeaseRenewalThreshold)
 
 	// Create the clientset
 	clients, err := newClientSet(r.config)
@@ -870,7 +915,6 @@ func (r *Runner) init() error {
 
 	numTemplates := len(*r.config.Templates)
 	templates := make([]*template.Template, 0, numTemplates)
-	ctemplatesMap := make(map[string]config.TemplateConfigs)
 
 	// Iterate over each TemplateConfig, creating a new Template resource for each
 	// entry. Templates are parsed and saved, and a map of templates to their
@@ -890,23 +934,19 @@ func (r *Runner) init() error {
 			Source:           config.StringVal(ctmpl.Source),
 			Contents:         config.StringVal(ctmpl.Contents),
 			ErrMissingKey:    config.BoolVal(ctmpl.ErrMissingKey),
+			ErrFatal:         config.BoolVal(ctmpl.ErrFatal),
 			LeftDelim:        leftDelim,
 			RightDelim:       rightDelim,
 			FunctionDenylist: ctmpl.FunctionDenylist,
 			SandboxPath:      config.StringVal(ctmpl.SandboxPath),
+			Destination:      config.StringVal(ctmpl.Destination),
+			Config:           ctmpl,
 		})
 		if err != nil {
 			return err
 		}
 
-		if _, ok := ctemplatesMap[tmpl.ID()]; !ok {
-			templates = append(templates, tmpl)
-		}
-
-		if _, ok := ctemplatesMap[tmpl.ID()]; !ok {
-			ctemplatesMap[tmpl.ID()] = make([]*config.TemplateConfig, 0, 1)
-		}
-		ctemplatesMap[tmpl.ID()] = append(ctemplatesMap[tmpl.ID()], ctmpl)
+		templates = append(templates, tmpl)
 	}
 
 	// Convert the map of templates (which was only used to ensure uniqueness)
@@ -919,7 +959,6 @@ func (r *Runner) init() error {
 	r.renderedCh = make(chan struct{}, 1)
 	r.renderEventCh = make(chan struct{}, 1)
 
-	r.ctemplatesMap = ctemplatesMap
 	r.inStream = os.Stdin
 	r.outStream = os.Stdout
 	r.errStream = os.Stderr
@@ -971,8 +1010,8 @@ func (r *Runner) diffAndUpdateDeps(depsMap map[string]dep.Dependency) {
 }
 
 // TemplateConfigFor returns the TemplateConfig for the given Template
-func (r *Runner) templateConfigsFor(tmpl *template.Template) []*config.TemplateConfig {
-	return r.ctemplatesMap[tmpl.ID()]
+func (r *Runner) templateConfigFor(tmpl *template.Template) *config.TemplateConfig {
+	return tmpl.Config()
 }
 
 // TemplateConfigMapping returns a mapping between the template ID and the set
@@ -980,14 +1019,14 @@ func (r *Runner) templateConfigsFor(tmpl *template.Template) []*config.TemplateC
 func (r *Runner) TemplateConfigMapping() map[string][]*config.TemplateConfig {
 	// this method is primarily used to support embedding consul-template
 	// in other applications (ex. Nomad)
-	m := make(map[string][]*config.TemplateConfig, len(r.ctemplatesMap))
+	m := make(map[string][]*config.TemplateConfig)
 
-	for id, set := range r.ctemplatesMap {
-		ctmpls := make([]*config.TemplateConfig, len(set))
-		m[id] = ctmpls
-		for i, ctmpl := range set {
-			ctmpls[i] = ctmpl
-		}
+	for _, tmpl := range r.templates {
+		m[tmpl.ID()] = []*config.TemplateConfig{}
+	}
+
+	for _, tmpl := range r.templates {
+		m[tmpl.ID()] = append(m[tmpl.ID()], tmpl.Config())
 	}
 
 	return m
@@ -1033,6 +1072,14 @@ func (r *Runner) childEnv() []string {
 
 	if config.BoolVal(r.config.Consul.Auth.Enabled) {
 		m["CONSUL_HTTP_AUTH"] = r.config.Consul.Auth.String()
+	}
+
+	if config.StringPresent(r.config.Consul.Token) {
+		m["CONSUL_HTTP_TOKEN"] = config.StringVal(r.config.Consul.Token)
+	}
+
+	if config.StringPresent(r.config.Consul.TokenFile) {
+		m["CONSUL_HTTP_TOKEN_FILE"] = config.StringVal(r.config.Consul.TokenFile)
 	}
 
 	m["CONSUL_HTTP_SSL"] = strconv.FormatBool(config.BoolVal(r.config.Consul.SSL.Enabled))
@@ -1140,7 +1187,7 @@ type spawnChildInput struct {
 	Stdin        io.Reader
 	Stdout       io.Writer
 	Stderr       io.Writer
-	Command      string
+	Command      []string
 	Timeout      time.Duration
 	Env          []string
 	ReloadSignal os.Signal
@@ -1234,9 +1281,9 @@ func (q *quiescence) tick() {
 // findCommand searches the list of template configs for the given command and
 // returns it if it exists.
 func findCommand(c *config.TemplateConfig, templates []*config.TemplateConfig) *config.TemplateConfig {
-	needle := config.StringVal(c.Exec.Command)
+	needle := c.Exec.Command
 	for _, t := range templates {
-		if needle == config.StringVal(t.Exec.Command) {
+		if reflect.DeepEqual(needle, t.Exec.Command) {
 			return t
 		}
 	}
@@ -1251,6 +1298,7 @@ func newClientSet(c *config.Config) (*dep.ClientSet, error) {
 		Address:                      config.StringVal(c.Consul.Address),
 		Namespace:                    config.StringVal(c.Consul.Namespace),
 		Token:                        config.StringVal(c.Consul.Token),
+		TokenFile:                    config.StringVal(c.Consul.TokenFile),
 		AuthEnabled:                  config.BoolVal(c.Consul.Auth.Enabled),
 		AuthUsername:                 config.StringVal(c.Consul.Auth.Username),
 		AuthPassword:                 config.StringVal(c.Consul.Auth.Password),
@@ -1284,6 +1332,7 @@ func newClientSet(c *config.Config) (*dep.ClientSet, error) {
 		SSLCACert:                    config.StringVal(c.Vault.SSL.CaCert),
 		SSLCAPath:                    config.StringVal(c.Vault.SSL.CaPath),
 		ServerName:                   config.StringVal(c.Vault.SSL.ServerName),
+		TransportCustomDialer:        c.Vault.Transport.CustomDialer,
 		TransportDialKeepAlive:       config.TimeDurationVal(c.Vault.Transport.DialKeepAlive),
 		TransportDialTimeout:         config.TimeDurationVal(c.Vault.Transport.DialTimeout),
 		TransportDisableKeepAlives:   config.BoolVal(c.Vault.Transport.DisableKeepAlives),
@@ -1291,6 +1340,31 @@ func newClientSet(c *config.Config) (*dep.ClientSet, error) {
 		TransportMaxIdleConns:        config.IntVal(c.Vault.Transport.MaxIdleConns),
 		TransportMaxIdleConnsPerHost: config.IntVal(c.Vault.Transport.MaxIdleConnsPerHost),
 		TransportTLSHandshakeTimeout: config.TimeDurationVal(c.Vault.Transport.TLSHandshakeTimeout),
+	}); err != nil {
+		return nil, fmt.Errorf("runner: %s", err)
+	}
+
+	if err := clients.CreateNomadClient(&dep.CreateNomadClientInput{
+		Address:                      config.StringVal(c.Nomad.Address),
+		Namespace:                    config.StringVal(c.Nomad.Namespace),
+		Token:                        config.StringVal(c.Nomad.Token),
+		AuthUsername:                 config.StringVal(c.Nomad.AuthUsername),
+		AuthPassword:                 config.StringVal(c.Nomad.AuthPassword),
+		SSLEnabled:                   config.BoolVal(c.Vault.SSL.Enabled),
+		SSLVerify:                    config.BoolVal(c.Vault.SSL.Verify),
+		SSLCert:                      config.StringVal(c.Vault.SSL.Cert),
+		SSLKey:                       config.StringVal(c.Vault.SSL.Key),
+		SSLCACert:                    config.StringVal(c.Vault.SSL.CaCert),
+		SSLCAPath:                    config.StringVal(c.Vault.SSL.CaPath),
+		ServerName:                   config.StringVal(c.Vault.SSL.ServerName),
+		TransportCustomDialer:        c.Nomad.Transport.CustomDialer,
+		TransportDialKeepAlive:       config.TimeDurationVal(c.Nomad.Transport.DialKeepAlive),
+		TransportDialTimeout:         config.TimeDurationVal(c.Nomad.Transport.DialTimeout),
+		TransportDisableKeepAlives:   config.BoolVal(c.Nomad.Transport.DisableKeepAlives),
+		TransportIdleConnTimeout:     config.TimeDurationVal(c.Nomad.Transport.IdleConnTimeout),
+		TransportMaxIdleConns:        config.IntVal(c.Nomad.Transport.MaxIdleConns),
+		TransportMaxIdleConnsPerHost: config.IntVal(c.Nomad.Transport.MaxIdleConnsPerHost),
+		TransportTLSHandshakeTimeout: config.TimeDurationVal(c.Nomad.Transport.TLSHandshakeTimeout),
 	}); err != nil {
 		return nil, fmt.Errorf("runner: %s", err)
 	}

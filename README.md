@@ -37,6 +37,7 @@ this functionality might prove useful.
 - [Math Functions](docs/templating-language.md#math-functions)
 - [Observability](docs/observability.md)
 - [Logging](docs/observability.md#logging)
+  - [Logging to file](docs/observability.md#logging-to-file)
 - [Modes](docs/modes.md)
 - [Once Mode](docs/modes.md#once-mode)
 - [De-Duplication Mode](docs/modes.md#de-duplication-mode)
@@ -44,7 +45,7 @@ this functionality might prove useful.
 - [Plugins](docs/plugins.md)
 - [Caveats](#caveats)
 - [Docker Image Use](#docker-image-use)
-- [Dots in Service Names](#dots-in-service-names)  
+- [Dots in Service Names](#dots-in-service-names)
 - [Termination on Error](#termination-on-error)
 - [Commands](#commands)
   - [Environment](#environment)
@@ -222,6 +223,7 @@ The current processes environment is used when executing commands with the follo
 
 - `CONSUL_HTTP_ADDR`
 - `CONSUL_HTTP_TOKEN`
+- `CONSUL_HTTP_TOKEN_FILE`
 - `CONSUL_HTTP_AUTH`
 - `CONSUL_HTTP_SSL`
 - `CONSUL_HTTP_SSL_VERIFY`
@@ -235,27 +237,36 @@ users the ability to further customize their command script.
 #### Multiple Commands
 
 The command configured for running on template rendering must take one of two
-forms. 
+forms.
 
-The first is as a single command without spaces in its name and no arguments.
-This form of command will be called directly by consul-template and is good for
-any situation. The command can be a shell script or an executable, anything
-called via a single word, and must be either on the runtime search PATH or the
-absolute path to the executable. The single word limination is necessary to
-eliminate any need for parsing the command line. For example..
+The first is as a list of the command and arguments split at spaces. The
+command can use an absolute path or be found on the execution environment's
+PATH and must be the first item in the list. This form allows for single or
+multi-word commands that can be executed directly with a system call. For
+example...
 
-`command = "/opt/foo"` or, if on PATH, `command = "foo"`
+`command = ["echo", "hello"]`
+`command = ["/opt/foo-package/bin/run-foo"]`
+`command = ["foo"]`
 
-The second form is as a multi-word command, a command with arguments or a more
-complex shell command. This form **requires** a shell named `sh` be on the
-executable search path (eg. PATH on *nix). This is the standard on all *nix
-systems and should work out of the box on those systems. This won't work on,
-for example, Docker images with only the executable and not a minimal system
-like Alpine. Using this form you can join multiple commands with logical
-operators, `&&` and `||`, use pipelines with `|`, conditionals, etc. Note that
-the shell `sh` is normally `/bin/sh` on *nix systems and is either a POSIX
-shell or a shell run in POSIX compatible mode, so it is best to stick to POSIX
-shell syntax in this command. For example..
+Note that if you give a single command without the list denoting square
+brackets (`[]`) it is converted into a list with a single argument.
+
+This:
+`command = "foo"`
+is equivalent to:
+`command = ["foo"]`
+
+The second form is as a single quoted command using system shell features. This
+form **requires** a shell named `sh` be on the executable search path (eg. PATH
+on \*nix). This is the standard on all \*nix systems and should work out of the
+box on those systems. This won't work on, for example, Docker images with only
+the executable and without a minimal system like Alpine. Using this form you
+can join multiple commands with logical operators, `&&` and `||`, use pipelines
+with `|`, conditionals, etc. Note that the shell `sh` is normally `/bin/sh` on
+\*nix systems and is either a POSIX shell or a shell run in POSIX compatible
+mode, so it is best to stick to POSIX shell syntax in this command. For
+example..
 
 `command = "/opt/foo && /opt/bar"`
 
@@ -264,6 +275,43 @@ shell syntax in this command. For example..
 Using this method you can run as many shell commands as you need with whatever
 logic you need. Though it is suggested that if it gets too long you might want
 to wrap it in a shell script, deploy and run that.
+
+#### Shell Commands and Exec Mode
+
+Using the system shell based command has one additional caveat when used for
+the Exec mode process (the managed, executed process to which it will propagate
+signals). That is to get signals to work correctly means not only does anything
+the shell runs need to handle signals, but the shell itself needs to handle
+them. This needs to be managed by you as shells will exit upon receiving most
+signals.
+
+A common example of this would be wanting the SIGHUP signal to trigger a reload
+of the underlying process and to be ignored by the shell process. To get this
+you have 2 options, you can use `trap` to ignore the signal or you can use
+`exec` to replace the shell with another process.
+
+To use `trap` to ignore the signal, you call `trap` to catch the signal in the
+shell with no action. For example if you had an underlying nginx process you
+wanted to run with a shell command and have the shell ignore it you'd do..
+
+`command = "trap '' HUP; /usr/sbin/nginx -c /etc/nginx/nginx.conf"`
+
+The `trap '' HUP;` bit is enough to get the shell to ignore the HUP signal. If
+you left off the `trap` command nginx would reload but the shell command would
+exit but leave the nginx still running, not unmanaged.
+
+Alternatively using `exec` will replace the shell's process with a sub-process,
+keeping the same PID and process grouping (allowing the sub-process to be
+managed). This is simpler, but a bit less flexible than `trap`, and looks
+like..
+
+`command = "exec /usr/sbin/nginx -c /etc/nginx/nginx.conf"`
+
+Where the nginx process would replace the enclosing shell process to be managed
+by consul-template, receiving the Signals directly. Basically `exec` eliminates
+the shell from the equation.
+
+See your shell's documentation on `trap` and/or `exec` for more details on this.
 
 ### Multi-phase Execution
 

@@ -1,10 +1,11 @@
+//go:build windows
 // +build windows
 
 package child
 
 import "os/exec"
 
-func setSetpgid(cmd *exec.Cmd, value bool) {}
+func setSysProcAttr(cmd *exec.Cmd, setpgid, setsid bool) {}
 
 func processNotFoundErr(err error) bool {
 	return false

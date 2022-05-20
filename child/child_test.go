@@ -1,14 +1,20 @@
 package child
 
 import (
+	"bytes"
+	"github.com/hashicorp/go-hclog"
 	"io/ioutil"
+	"log"
 	"os"
 	"reflect"
+	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/go-gatedio"
+	"golang.org/x/sys/unix"
 )
 
 const fileWaitSleepDelay = 50 * time.Millisecond
@@ -433,6 +439,7 @@ func TestSetpgid(t *testing.T) {
 		c.command = "sh"
 		c.args = []string{"-c", "while true; do sleep 0.2; done"}
 		// default, but to be explicit for the test
+		c.setsid = false
 		c.setpgid = true
 
 		if err := c.Start(); err != nil {
@@ -440,7 +447,7 @@ func TestSetpgid(t *testing.T) {
 		}
 		defer c.Stop()
 
-		// when setpgid is true, the pid and gpid should be the same
+		// when setsid is false, the pid and gpid should be the same
 		gpid, err := syscall.Getpgid(c.Pid())
 		if err != nil {
 			t.Fatal("Getpgid error:", err)
@@ -454,6 +461,7 @@ func TestSetpgid(t *testing.T) {
 		c := testChild(t)
 		c.command = "sh"
 		c.args = []string{"-c", "while true; do sleep 0.2; done"}
+		c.setsid = false
 		c.setpgid = false
 
 		if err := c.Start(); err != nil {
@@ -461,7 +469,7 @@ func TestSetpgid(t *testing.T) {
 		}
 		defer c.Stop()
 
-		// when setpgid is true, the pid and gpid should be the same
+		// when setpgid is false, the pid and gpid should not be the same
 		gpid, err := syscall.Getpgid(c.Pid())
 		if err != nil {
 			t.Fatal("Getpgid error:", err)
@@ -471,4 +479,132 @@ func TestSetpgid(t *testing.T) {
 			t.Fatal("pid and gpid should NOT match")
 		}
 	})
+}
+
+func TestSetsid(t *testing.T) {
+	t.Run("true", func(t *testing.T) {
+		c := testChild(t)
+		c.command = "sh"
+		c.args = []string{"-c", "while true; do sleep 0.2; done"}
+		c.setsid = true
+		c.setpgid = false
+
+		var err error
+
+		if err = c.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer c.Stop()
+
+		var sid int = -1
+
+		os := runtime.GOOS
+
+		switch os {
+		//  Using x/sys/unix for Unix systems
+		case "linux", "darwin":
+			sid, err = unix.Getsid(c.Pid())
+			if err != nil {
+				t.Fatal("Getsid error:", err)
+			}
+		// Stub for windows which isn't supported
+		case "windows":
+			sid = c.Pid()
+		}
+
+		// when setsid is true, the pid and sid should match
+		if c.Pid() != sid {
+			t.Fatal("pid and sid should match when setsid is true")
+		}
+	})
+	t.Run("false", func(t *testing.T) {
+		c := testChild(t)
+		c.command = "sh"
+		c.args = []string{"-c", "while true; do sleep 0.2; done"}
+		c.setsid = false
+		c.setpgid = false
+
+		var err error
+
+		if err = c.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer c.Stop()
+
+		var sid int
+
+		os := runtime.GOOS
+
+		switch os {
+		//  Using x/sys/unix for Unix systems
+		case "darwin":
+		case "linux":
+			sid, err = unix.Getsid(c.Pid())
+			if err != nil {
+				t.Fatal("Getsid error:", err)
+			}
+		// Stub for windows which isn't supported
+		case "windows":
+			sid = -1
+		}
+
+		// when setsid is false, the pid and sid should not match
+		if c.Pid() == sid {
+			t.Fatal("pid and sid should not match when setsid is false")
+		}
+	})
+}
+
+func TestLog(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer func() {
+		log.SetOutput(os.Stderr)
+	}()
+
+	c := testChild(t)
+	c.command = "sh"
+	c.args = []string{"-c", "echo 1"}
+
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+	expected := "[INFO] (child) spawning: sh -c echo 1\n"
+	actual := buf.String()
+
+	// trim off leading timestamp
+	index := strings.Index(actual, "[")
+	actual = actual[index:]
+	if actual != expected {
+		t.Fatalf("Expected '%s' to be '%s'", actual, expected)
+	}
+}
+
+func TestCustomLogger(t *testing.T) {
+	var buf bytes.Buffer
+
+	c := testChild(t)
+	c.command = "sh"
+	c.args = []string{"-c", "echo 1"}
+	c.logger = hclog.New(&hclog.LoggerOptions{
+		Output: &buf,
+	}).With("child-name", "echo").StandardLogger(&hclog.StandardLoggerOptions{
+		InferLevels: true,
+		ForceLevel:  0,
+	})
+
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+	expected := " [INFO]  (child) spawning: sh -c echo 1: child-name=echo\n"
+	actual := buf.String()
+
+	// trim off leading timestamp
+	index := strings.Index(actual, " ")
+	actual = actual[index:]
+	if actual != expected {
+		t.Fatalf("Expected '%s' to be '%s'", actual, expected)
+	}
 }

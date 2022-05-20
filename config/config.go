@@ -63,6 +63,9 @@ type Config struct {
 	// LogLevel is the level with which to log for this config.
 	LogLevel *string `mapstructure:"log_level"`
 
+	// FileLog is the configuration for file logging.
+	FileLog *LogFileConfig `mapstructure:"log_file"`
+
 	// MaxStale is the maximum amount of time for staleness from Consul as given
 	// by LastContact. If supplied, Consul Template will query all servers instead
 	// of just the leader.
@@ -81,8 +84,15 @@ type Config struct {
 	// Templates is the list of templates.
 	Templates *TemplateConfigs `mapstructure:"template"`
 
+	// TemplateErrFatal determines whether template errors should cause the
+	// process to exit, or just log and continue.
+	TemplateErrFatal *bool `mapstructure:"template_error_fatal"`
+
 	// Vault is the configuration for connecting to a vault server.
 	Vault *VaultConfig `mapstructure:"vault"`
+
+	// Nomad is the configuration for connecting to a Nomad agent.
+	Nomad *NomadConfig `mapstructure:"nomad"`
 
 	// Wait is the quiescence timers.
 	Wait *WaitConfig `mapstructure:"wait"`
@@ -90,6 +100,10 @@ type Config struct {
 	// Additional command line options
 	// Run once, executing each template exactly once, and exit
 	Once bool
+
+	// ParseOnly prevents any rendering and only loads the templates for
+	// checking well formedness.
+	ParseOnly bool
 
 	// BlockQueryWaitTime is amount of time in seconds to do a blocking query for
 	BlockQueryWaitTime *time.Duration `mapstructure:"block_query_wait"`
@@ -131,12 +145,20 @@ func (c *Config) Copy() *Config {
 
 	o.ReloadSignal = c.ReloadSignal
 
+	if c.FileLog != nil {
+		o.FileLog = c.FileLog.Copy()
+	}
+
 	if c.Syslog != nil {
 		o.Syslog = c.Syslog.Copy()
 	}
 
 	if c.Templates != nil {
 		o.Templates = c.Templates.Copy()
+	}
+
+	if c.TemplateErrFatal != nil {
+		o.TemplateErrFatal = c.TemplateErrFatal
 	}
 
 	if c.Vault != nil {
@@ -148,8 +170,13 @@ func (c *Config) Copy() *Config {
 	}
 
 	o.Once = c.Once
+	o.ParseOnly = c.ParseOnly
 
 	o.BlockQueryWaitTime = c.BlockQueryWaitTime
+
+	if c.Nomad != nil {
+		o.Nomad = o.Nomad.Copy()
+	}
 
 	return &o
 }
@@ -206,12 +233,20 @@ func (c *Config) Merge(o *Config) *Config {
 		r.ReloadSignal = o.ReloadSignal
 	}
 
+	if o.FileLog != nil {
+		r.FileLog = r.FileLog.Merge(o.FileLog)
+	}
+
 	if o.Syslog != nil {
 		r.Syslog = r.Syslog.Merge(o.Syslog)
 	}
 
 	if o.Templates != nil {
 		r.Templates = r.Templates.Merge(o.Templates)
+	}
+
+	if o.TemplateErrFatal != nil {
+		r.TemplateErrFatal = o.TemplateErrFatal
 	}
 
 	if o.Vault != nil {
@@ -227,6 +262,11 @@ func (c *Config) Merge(o *Config) *Config {
 	}
 
 	r.Once = o.Once
+	r.ParseOnly = o.ParseOnly
+
+	if o.Nomad != nil {
+		r.Nomad = r.Nomad.Merge(o.Nomad)
+	}
 
 	return r
 }
@@ -256,6 +296,10 @@ func Parse(s string) (*Config, error) {
 		"env",
 		"exec",
 		"exec.env",
+		"log_file",
+		"nomad",
+		"nomad.ssl",
+		"nomad.transport",
 		"ssl",
 		"syslog",
 		"vault",
@@ -414,8 +458,10 @@ func (c *Config) GoString() string {
 		"MaxStale:%s, "+
 		"PidFile:%s, "+
 		"ReloadSignal:%s, "+
+		"FileLog:%#v, "+
 		"Syslog:%#v, "+
 		"Templates:%#v, "+
+		"TemplateErrFatal:%#v"+
 		"Vault:%#v, "+
 		"Wait:%#v, "+
 		"Once:%#v, "+
@@ -430,8 +476,10 @@ func (c *Config) GoString() string {
 		TimeDurationGoString(c.MaxStale),
 		StringGoString(c.PidFile),
 		SignalGoString(c.ReloadSignal),
+		c.FileLog,
 		c.Syslog,
 		c.Templates,
+		c.TemplateErrFatal,
 		c.Vault,
 		c.Wait,
 		c.Once,
@@ -474,6 +522,8 @@ func DefaultConfig() *Config {
 		Dedup:         DefaultDedupConfig(),
 		DefaultDelims: DefaultDefaultDelims(),
 		Exec:          DefaultExecConfig(),
+		FileLog:       DefaultLogFileConfig(),
+		Nomad:         DefaultNomadConfig(),
 		Syslog:        DefaultSyslogConfig(),
 		Templates:     DefaultTemplateConfigs(),
 		Vault:         DefaultVaultConfig(),
@@ -533,6 +583,16 @@ func (c *Config) Finalize() {
 		c.ReloadSignal = Signal(DefaultReloadSignal)
 	}
 
+	if c.FileLog == nil {
+		c.FileLog = DefaultLogFileConfig()
+	}
+	c.FileLog.Finalize()
+
+	if c.Nomad == nil {
+		c.Nomad = DefaultNomadConfig()
+	}
+	c.Nomad.Finalize()
+
 	if c.Syslog == nil {
 		c.Syslog = DefaultSyslogConfig()
 	}
@@ -540,6 +600,11 @@ func (c *Config) Finalize() {
 
 	if c.Templates == nil {
 		c.Templates = DefaultTemplateConfigs()
+	}
+	for _, tmpl := range *c.Templates {
+		if tmpl.ErrFatal == nil {
+			tmpl.ErrFatal = c.TemplateErrFatal
+		}
 	}
 	c.Templates.Finalize()
 

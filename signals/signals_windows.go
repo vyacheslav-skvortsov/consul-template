@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 package signals
@@ -6,9 +7,6 @@ import (
 	"os"
 	"syscall"
 )
-
-// RuntimeSig is set to nil on windows as it doesn't support the signal (SIGURG)
-var RuntimeSig = os.Signal(nil)
 
 var SignalLookup = map[string]os.Signal{
 	"SIGABRT": syscall.SIGABRT,

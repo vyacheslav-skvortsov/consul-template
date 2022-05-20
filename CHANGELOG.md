@@ -1,7 +1,64 @@
+## v0.29.0 (Apr 20, 2022)
+
+IMPROVEMENTS:
+* Nomad Service Discovery! [[GH-1565](https://github.com/hashicorp/consul-template/pull/1565)]
+* New `pkiCert` template function provides self-caching certificates [[GH-1559](https://github.com/hashicorp/consul-template/pull/1559), [GH-1259](https://github.com/hashicorp/consul-template/issues/1259)]
+* Add string trim template functions [[GH-1558](https://github.com/hashicorp/consul-template/pull/1558), [GH-1544](https://github.com/hashicorp/consul-template/issues/1544)]
+
+BUG FIXES:
+* Fix issue with multiple identical templates using the same path [[GH-1573](https://github.com/hashicorp/consul-template/pull/1573)]
+* Reduce signal processing overhead [[GH-1575](https://github.com/hashicorp/consul-template/pull/1575), [GH-1548](https://github.com/hashicorp/consul-template/issues/1548)]
+* Fix issue with template user/group setting [[GH-1571](https://github.com/hashicorp/consul-template/pull/1571), [GH-1570](https://github.com/hashicorp/consul-template/issues/1570)]
+
+
+## v0.28.1 (Apr 04, 2022)
+
+IMPROVEMENTS:
+* Allow setting template destination file ownership by name (with uid/gid compatibilty) [[GH-1541](https://github.com/hashicorp/consul-template/pull/1541), [GH-1551](https://github.com/hashicorp/consul-template/pull/1551)]
+* better writeToFile user/group ownership behaviors [[GH-1549](https://github.com/hashicorp/consul-template/pull/1549)]
+* configurable lease check wait for non-renewable secrets [[GH-1546](https://github.com/hashicorp/consul-template/pull/1546)]
+
+## v0.28.0 (Mar 04, 2022)
+
+BUG FIXES:
+* Fix issue returning typed nil pointers in template functions [[GH-1535](https://github.com/hashicorp/consul-template/pull/1535), [GH-1418](https://github.com/hashicorp/consul-template/issues/1418)]
+* Support secret write queries w/ an empty write [[GH-1532](https://github.com/hashicorp/consul-template/pull/1532), [GH-1453](https://github.com/hashicorp/consul-template/issues/1453)]
+
+
+IMPROVEMENTS:
+* Add sprig library [[GH-1312](https://github.com/hashicorp/consul-template/pull/1312)]
+* Add option to make template errors non-fatal [[GH-1420](https://github.com/hashicorp/consul-template/pull/1420), [GH-1419](https://github.com/hashicorp/consul-template/issues/1419), [GH-1289](https://github.com/hashicorp/consul-template/issues/1289)]
+* Support for accepting a custom logger for a child process [[GH-1515](https://github.com/hashicorp/consul-template/pull/1515)]
+* Add support for providing Consul ACL Token via a file [[GH-1516](https://github.com/hashicorp/consul-template/pull/1516), [GH-1429](https://github.com/hashicorp/consul-template/issues/1429)]
+* Allow setting user/group ownership of template output [[GH-1531](https://github.com/hashicorp/consul-template/pull/1531), [GH-1497](https://github.com/hashicorp/consul-template/issues/1497), [GH-639](https://github.com/hashicorp/consul-template/issues/639)]
+* Logging to file [[GH-1534](https://github.com/hashicorp/consul-template/pull/1534), [GH-1416](https://github.com/hashicorp/consul-template/issues/1416)]]
+* Support command/exec lists [[GH-1543](https://github.com/hashicorp/consul-template/pull/1543), [GH-1518](https://github.com/hashicorp/consul-template/issues/1518)]
+
+
+## v0.27.2 (Nov 05, 2021)
+
+BUG FIXES:
+* Syslog doesn't work after upgrade to 0.27 [[GH-1523](https://github.com/hashicorp/consul-template/issues/1523), [GH-1529](https://github.com/hashicorp/consul-template/pull/1529)]
+
+## v0.27.1 (Sep 22, 2021)
+
+IMPROVEMENTS:
+* Updated command execution on \*nix systems to call the command directly,
+  without the `sh -c` wrapping shell command, *only* in cases where the command
+  is a single word (no spaces). This allows docker to run in environments (like
+  a minimal docker image) where there is no shell (`sh`). Multi-word commands
+  will continue to use the wrapping shell call.
+  [[GH-1509](https://github.com/hashicorp/consul-template/pull/1509),
+  [GH-1508](https://github.com/hashicorp/consul-template/issues/1508)]
+
+SECURITY:
+* Updated golang.or/x/crypto dependency for CVE-2020-29652. [[GH-1507](https://github.com/hashicorp/consul-template/issues/1507)]
+
+
 ## v0.27.0 (Aug 16, 2021)
 
 BREAKING CHANGES:
-* All command execution calls are now made (on *nix systems) using a shell command call ('/bin/sh -c ...') with [process group](https://man7.org/linux/man-pages/man2/setpgid.2.html) set to ensure all signals are propagated to the called commands. This was done to eliminate the need for parsing the shell command as it was a continual source of bugs. Windows systems currently only support single command calls because of no (known) 'sh -c' equivalent on Windows. [[GH-1496](https://github.com/hashicorp/consul-template/pull/1496), [GH-1494](https://github.com/hashicorp/consul-template/pull/1494)]
+* All command execution calls are now made (on \*nix systems) using a shell command call ('/bin/sh -c ...') with [process group](https://man7.org/linux/man-pages/man2/setpgid.2.html) set to ensure all signals are propagated to the called commands. This was done to eliminate the need for parsing the shell command as it was a continual source of bugs. Windows systems currently only support single command calls because of no (known) 'sh -c' equivalent on Windows. [[GH-1496](https://github.com/hashicorp/consul-template/pull/1496), [GH-1494](https://github.com/hashicorp/consul-template/pull/1494)]
 
 IMPROVEMENTS:
 * New Docker Image. Similar to old Alpine image but modernized and simplified [[GH-1481](https://github.com/hashicorp/consul-template/issues/1481), [GH-1484](https://github.com/hashicorp/consul-template/pull/1484)]
